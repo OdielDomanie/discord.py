@@ -780,7 +780,7 @@ class DiscordVoiceWebSocket:
     SESSION_DESCRIPTION
         Receive only. Gives you the secret key required for voice.
     SPEAKING
-        Send only. Notifies the client if you are currently speaking.
+        Notifies the client if you are currently speaking.
     HEARTBEAT_ACK
         Receive only. Tells you your heartbeat has been acknowledged.
     RESUME
@@ -830,6 +830,7 @@ class DiscordVoiceWebSocket:
         self.secret_key: Optional[str] = None
         if hook:
             self._hook = hook  # type: ignore - type-checker doesn't like overriding methods
+        self.ssrc_map: dict[int, int] = {}  # {ssrc: user_id}
 
     async def _hook(self, *args: Any) -> None:
         pass
@@ -941,6 +942,11 @@ class DiscordVoiceWebSocket:
             interval = data['heartbeat_interval'] / 1000.0
             self._keep_alive = VoiceKeepAliveHandler(ws=self, interval=min(interval, 5.0))
             self._keep_alive.start()
+        elif op == self.SPEAKING:
+            ssrc = data["ssrc"]  # type: ignore
+            user_id = int(data["user_id"])  # type: ignore
+            speaking = data["speaking"]  # type: ignore
+            self.ssrc_map[ssrc] = user_id
 
         await self._hook(self, msg)
 

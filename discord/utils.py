@@ -1149,3 +1149,47 @@ def format_dt(dt: datetime.datetime, /, style: Optional[TimestampStyle] = None) 
     if style is None:
         return f'<t:{int(dt.timestamp())}>'
     return f'<t:{int(dt.timestamp())}:{style}>'
+
+
+class ModularInt32(int):
+    "Integer that wraps around."
+
+    def __add__(self, __x: int) -> ModularInt32:
+        return ModularInt32((super().__add__(__x)) % 2**32)
+
+    @overload
+    def __sub__(self, __x: ModularInt32) -> int:
+        ...
+
+    @overload
+    def __sub__(self, __x: int) -> ModularInt32:
+        ...
+
+    def __sub__(self, __x):
+        if isinstance(__x, ModularInt32):
+            return (super().__sub__(__x)) % 2**32
+        else:
+            return ModularInt32(super().__sub__(__x) % 2**32)
+
+    def __gt__(self, __x: int) -> bool:
+        if isinstance(__x, ModularInt32):
+            return 0 < super().__sub__(__x) % 2**32 <= 2**31
+        return super().__gt__(__x)
+
+    def __ge__(self, __x: int) -> bool:
+        if isinstance(__x, ModularInt32):
+            return super().__sub__(__x) % 2**32 <= 2**31
+        return super().__gt__(__x)
+
+    def __lt__(self, __x: int) -> bool:
+        if isinstance(__x, ModularInt32):
+            return super().__sub__(__x) % 2**32 > 2**31
+        return super().__gt__(__x)
+
+    def __le__(self, __x: int) -> bool:
+        if isinstance(__x, ModularInt32):
+            return super().__sub__(__x) % 2**32 > 2**31 or self == __x
+        return super().__gt__(__x)
+
+    def __neg__(self):
+        return self ^ (1 << 31)
