@@ -60,6 +60,7 @@ from .scheduled_event import *
 from .interactions import *
 from .components import *
 from .threads import *
+from .voice_receive import *
 
 
 class VersionInfo(NamedTuple):
