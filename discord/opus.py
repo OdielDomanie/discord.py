@@ -217,7 +217,7 @@ def _load_default() -> bool:
             _filename = os.path.join(_basedir, 'bin', f'libopus-0.{_target}.dll')
             _lib = libopus_loader(_filename)
         else:
-            _lib = libopus_loader(ctypes.util.find_library('opus'))
+            _lib = libopus_loader(ctypes.util.find_library('opus'))  # type: ignore  # Exception caught.
     except Exception:
         _lib = None
 
@@ -437,29 +437,79 @@ class Decoder(_OpusStruct):
         return ret.value
 
     @overload
-    def decode(self, data: bytes, *, fec: bool) -> bytes:
+    def decode(
+        self,
+        data: Optional[bytes],
+        *,
+        fec: bool = False,
+        nb_frames: Optional[int] = None,
+        samples_per_frame: Optional[int] = None,
+    ) -> bytes:
         ...
 
     @overload
-    def decode(self, data: Literal[None], *, fec: Literal[False]) -> bytes:
+    def decode(
+        self,
+        data: bytes,
+        *,
+        fec: Literal[True],
+        missing_duration: Optional[int] = None,
+    ) -> bytes:
         ...
 
-    def decode(self, data: Optional[bytes], *, fec: bool = False) -> bytes:
+    @overload
+    def decode(
+        self,
+        data: Literal[None],
+        *,
+        fec: Literal[False],
+        missing_duration: Optional[int] = None,
+        ) -> bytes:
+        ...
+
+    def decode(
+        self,
+        data: Optional[bytes],
+        *,
+        fec: bool = False,
+        missing_duration: Optional[int] = None,
+        nb_frames: Optional[int] = None,
+        samples_per_frame: Optional[int] = None,
+    ) -> bytes:
+        """If `missing_duration` (in samples) is specified, `data` must be `None` or `fec` must be true.
+        If nb_frames, samples_per_frame or channel_count is specified, they won't be calculated from the data.
+        Similarly for samples_per_frame
+        Can raise OpusError.
+        """
         if data is None and fec:
             raise TypeError("Invalid arguments: FEC cannot be used with null data")
 
-        if data is None:
-            frame_size = self._get_last_packet_duration() or self.SAMPLES_PER_FRAME
-            channel_count = self.CHANNELS
+        if data is None or fec is True:
+            if missing_duration is None:
+                # frame_size is measured in number of samples.
+                frame_size = self._get_last_packet_duration() or self.SAMPLES_PER_FRAME
+            else:
+                frame_size = missing_duration
+                # if data is None, frame size must be a multiple of 2.5 ms.
+                samples_in_2_5ms = int(self.SAMPLING_RATE * 2.5 / 1000)
+                frame_size = frame_size // samples_in_2_5ms * samples_in_2_5ms
         else:
-            frames = self.packet_get_nb_frames(data)
-            channel_count = self.packet_get_nb_channels(data)
-            samples_per_frame = self.packet_get_samples_per_frame(data)
+            if nb_frames is None:
+                frames = self.packet_get_nb_frames(data)
+            else:
+                frames = nb_frames
+            if samples_per_frame is None:
+                samples_per_frame = self.packet_get_samples_per_frame(data)
             frame_size = frames * samples_per_frame
 
-        pcm = (ctypes.c_int16 * (frame_size * channel_count))()
+        channel_count = self.CHANNELS
+        pcm = (ctypes.c_int16 * (frame_size * channel_count * ctypes.sizeof(ctypes.c_int16)))()
         pcm_ptr = ctypes.cast(pcm, c_int16_ptr)
 
         ret = _lib.opus_decode(self._state, data, len(data) if data else 0, pcm_ptr, frame_size, fec)
 
         return array.array('h', pcm[: ret * channel_count]).tobytes()
+    
+    def pcm_size(self, duration: int):
+        "Get the pcm output size in bytes given duration in ms."
+        return self.SAMPLE_SIZE * self.SAMPLING_RATE * duration // 1000
