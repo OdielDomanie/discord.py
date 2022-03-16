@@ -456,7 +456,6 @@ class VoiceReceiver:
     def _silenceiterator(self, duration: int) -> Generator[bytes, None, None]:
         "`duration` is in samples."
         if duration == 0:
-            yield b""
             return
 
         SILENCE_CHUNK = self.SAMPLING_RATE // 2  # 0.5 seconds
