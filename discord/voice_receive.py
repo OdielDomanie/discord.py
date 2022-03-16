@@ -23,13 +23,10 @@ if TYPE_CHECKING:
     from .user import User
     from .voice_client import VoiceClient
 
-__all__ = (
-    'VoiceReceiver',
-)
+__all__ = ('VoiceReceiver',)
 
 
 _log = logging.getLogger(__name__)
-
 
 
 class VoiceReceiver:
@@ -220,7 +217,7 @@ class VoiceReceiver:
 
         return lock
 
-    async def _get_from_user(self, user: User | Member | int) -> tuple[ModularInt32, bytes]:
+    async def _get_from_user(self, user: User | Member | int) -> tuple[int, ModularInt32, bytes]:
         """Return the audio data of a user of duration at least FRAME_LENGTH.
         The gaps between the received packets are padded.
         This method should only be called by one consumer.
@@ -237,7 +234,7 @@ class VoiceReceiver:
                 continue
             else:
                 ssrc, timestamp, pcm = await self._get_from_ssrc(ssrc)
-                return timestamp, pcm
+                return ssrc, timestamp, pcm
 
     async def _get_from_ssrc(self, ssrc: int) -> tuple[int, ModularInt32, bytes]:
         heap = self._jitterbuffers.setdefault(ssrc, PriorityQueue(self.min_buffer))
@@ -301,13 +298,13 @@ class VoiceReceiver:
                 except asyncio.TimeoutError:
                     return
                 else:
-                    timestamp, pcm = get_task.result()
+                    ssrc, timestamp, pcm = get_task.result()
 
                     # If gap is non-zero, fill the gaps with silence
                     if fill_silence and not (last_timestamp is None or last_duration is None):
                         gap = timestamp - last_timestamp - last_duration
 
-                        for silence in self._silenceiterator(gap):
+                        for silence in self._silenceiterator(ssrc, gap):
                             new_timestamp = last_timestamp + last_duration
                             yield last_timestamp + last_duration, silence
                             last_timestamp = new_timestamp
@@ -338,13 +335,13 @@ class VoiceReceiver:
                         pending.pop().cancel()
                         return
                     else:
-                        timestamp, pcm = done_task.result()
+                        ssrc, timestamp, pcm = done_task.result()
 
                         # If gap is non-zero, fill the gaps with silence.
                         if fill_silence and not (last_timestamp is None or last_duration is None):
                             gap = timestamp - last_timestamp - last_duration
 
-                            for silence in self._silenceiterator(gap):
+                            for silence in self._silenceiterator(ssrc, gap):
                                 new_timestamp = last_timestamp + last_duration
                                 yield last_timestamp + last_duration, silence
                                 last_timestamp = new_timestamp
@@ -449,19 +446,23 @@ class VoiceReceiver:
         "Return the duration in seconds of the audio returned by this object."
         return len(pcm_audio) / opus.Decoder.SAMPLE_SIZE / self.SAMPLING_RATE
 
-    def generate_silence(self, duration: int) -> bytes:
-        "Duration is in samples. Return silence."
-        return b"\x00" * opus.Decoder.SAMPLE_SIZE * duration
+    def generate_silence(self, ssrc, duration: int) -> bytes:
+        "`duration` is in samples. Return silence."
+        assert duration >= 0, "duration must be non-negative."
+        if duration == 0:
+            return b""
+        else:
+            silence = self._decoders[ssrc].decode(None, fec=False, missing_duration=duration)
+            return silence
 
-    def _silenceiterator(self, duration: int) -> Generator[bytes, None, None]:
+    def _silenceiterator(self, ssrc: int, duration: int) -> Generator[bytes, None, None]:
         "`duration` is in samples."
         if duration == 0:
-            yield b""
             return
 
         SILENCE_CHUNK = self.SAMPLING_RATE // 2  # 0.5 seconds
         for _ in range(duration // SILENCE_CHUNK):
-            yield self.generate_silence(SILENCE_CHUNK)
+            yield self.generate_silence(ssrc, SILENCE_CHUNK)
         remainder = SILENCE_CHUNK % duration
         if remainder:
-            yield self.generate_silence(remainder)
+            yield self.generate_silence(ssrc, remainder)
