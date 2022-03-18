@@ -121,8 +121,8 @@ class VoiceReceiver:
 
     def _get_audio(self, ssrc) -> tuple[ModularInt32, bytes]:
         "Return decoded and padded audio pcm from the heap."
-        queue = self._long_buffers.setdefault(ssrc, deque())
-        heap = self._jitterbuffers.setdefault(ssrc, [])
+        queue = self._long_buffers[ssrc]
+        heap = self._jitterbuffers[ssrc]
         timestamp, local_timestamp, enc_audio = heapq.heappop(heap)
         if len(queue) > 0:
             heapq.heappush(heap, queue.popleft())
