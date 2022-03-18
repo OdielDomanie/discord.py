@@ -798,3 +798,9 @@ class VoiceClient(VoiceProtocol):
     def voice_receiver(self):
         "Return the Voice Receiver object, or None if voice is not currently being recorded."
         return self._receive_t_p and self._receive_t_p[1].vr
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.disconnect(force=True)
