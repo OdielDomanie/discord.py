@@ -101,27 +101,15 @@ class VoiceReceiver:
             self.ts_offsets[ssrc] = time.monotonic() - self.local_epoch
             # TODO: better offset calculation based on some moving average
 
-    _WAIT_SPEAK_PACKET = 0.050
+    def _get_user_id(self, ssrc: int) -> int | None:
+        "Return the user id associated with the ssrc."
+        return self.voice_client.ws.ssrc_map.get(ssrc)
 
-    async def _get_user_id(self, ssrc: int) -> int | None:
-        "Return the user id associated with the ssrc. If not known, wait a little in case a SPEAK message arrives."
-        async with self._get_user_locks.setdefault(ssrc, asyncio.Lock()):
-            user_id = self.voice_client.ws.ssrc_map.get(ssrc)
-            if user_id is None:
-                # If user is not yet known, it should be known when the SPEAK packet arrives.
-                await asyncio.sleep(self._WAIT_SPEAK_PACKET)
-                user_id = self.voice_client.ws.ssrc_map.get(ssrc)
-            return user_id
-
-    async def _get_ssrc(self, user_id: int) -> int | None:
-        try:
-            return next(ssrc for ssrc, user in self.voice_client.ws.ssrc_map.items() if user == user_id)
-        except StopIteration:
-            await asyncio.sleep(self._WAIT_SPEAK_PACKET)
-            return next(
-                (ssrc for ssrc, user in self.voice_client.ws.ssrc_map.items() if user == user_id),
-                None,
-            )
+    def _get_ssrc(self, user_id: int) -> int | None:
+        return next(
+            (ssrc for ssrc, user in self.voice_client.ws.ssrc_map.items() if user == user_id),
+            None,
+        )
 
     def _get_user(self, user_id: int) -> Member | User | None:
         member = self.voice_client.guild.get_member(user_id)
@@ -228,9 +216,9 @@ class VoiceReceiver:
         """
         while True:
             if isinstance(user, int):
-                ssrc = await self._get_ssrc(user)
+                ssrc = self._get_ssrc(user)
             else:
-                ssrc = await self._get_ssrc(user.id)
+                ssrc = self._get_ssrc(user.id)
 
             if ssrc is None:
                 # Wait until we can actually get the ssrc.
@@ -370,9 +358,9 @@ class VoiceReceiver:
                     # silence timeout
                     return
 
-    async def reset_user(self, user: User | Member | int):
+    def reset_user(self, user: User | Member | int):
         "Reset the state of a user."
-        ssrc = await self._get_ssrc(user if isinstance(user, int) else user.id)
+        ssrc = self._get_ssrc(user if isinstance(user, int) else user.id)
         if ssrc is None:
             return
         del self._long_buffers[ssrc]
@@ -420,7 +408,7 @@ class VoiceReceiver:
                     done_task = done.pop()
                     ssrc, timestamp, pcm = done_task.result()
 
-                    user_id = await self._get_user_id(ssrc)
+                    user_id = self._get_user_id(ssrc)
                     if user_id is None:
                         # Drop it, and reschedule the task.
                         new_get_coro = self._get_from_ssrc(ssrc)
