@@ -72,14 +72,13 @@ class VoiceReceiver:
         """This should not be called by user code.
         Appends the audio data to the buffer, drops it if buffer is full.
         """
-        if ssrc not in self._write_events:
+        if ssrc not in self._long_buffers:  # First time for this ssrc
             self._new_write_event.set()
-            self._write_events[ssrc] = asyncio.Event()
+            self._write_events.setdefault(ssrc, asyncio.Event())
         ssrc_write_event = self._write_events[ssrc]
         ssrc_write_event.set()
         self._write_event.set()
         self._last_written = ssrc
-
         queue = self._long_buffers.setdefault(ssrc, self._Buffer(self.maxsize))
         heap = self._jitterbuffers.setdefault(ssrc, PriorityQueue(self.min_buffer))
 
@@ -251,22 +250,23 @@ class VoiceReceiver:
                     # If the min_duration is 0.100s, and the next packet arrived 0.700s ago, than wait 0.300s or until the
                     # heap is full, than return from the heap.
                     wait_time = min_duration - (time.monotonic() - local_timestamp / 1000)
-
-                done, pending = await asyncio.wait((write_event.wait(),), timeout=wait_time)
-                if pending:
+                
+                try:
+                    await asyncio.wait_for(write_event.wait(), timeout=wait_time)
+                except asyncio.TimeoutError:
                     # We waited enough.
                     # The heap can't be empty.
-
-                    # Cancel the write_event.wait()
-                    pending.pop().cancel()
-
                     break
                 else:
                     # Something was pushed to the heap. We have to recalculate the waiting time, or just return if the heap
                     # has filled after this write event.
                     write_event.clear()  # Each resolved write_event.wait() must be followed by .clear()
 
-            return ssrc, *self._get_audio(ssrc)
+            try:
+                return ssrc, *self._get_audio(ssrc)
+            except BaseException as e:
+                _log.exception(e)
+                raise
 
     async def iterate_user(
         self,
@@ -389,7 +389,7 @@ class VoiceReceiver:
         tasks.add(new_write_wait)
 
         while True:
-            done, pending = await asyncio.wait(tasks, timeout=None)
+            done, pending = await asyncio.wait(tasks, timeout=None, return_when=asyncio.FIRST_COMPLETED)
 
             if done:  # no timeout
 
@@ -401,20 +401,16 @@ class VoiceReceiver:
                     new_get_coro = self._get_from_ssrc(self._last_written)  # type: ignore  # last_written can't be None.
                     new_get_task = asyncio.create_task(new_get_coro)
                     done.add(new_get_task)
+                    new_write_wait = asyncio.create_task(self._new_write_event.wait())
+                    done.add(new_write_wait)
                     done.update(pending)
                     tasks = done
 
                 else:  # Audio is returned from at least one ssrc.
                     done_task = done.pop()
                     ssrc, timestamp, pcm = done_task.result()
-
                     user_id = self._get_user_id(ssrc)
-                    if user_id is None:
-                        # Drop it, and reschedule the task.
-                        new_get_coro = self._get_from_ssrc(ssrc)
-                        new_get_task = asyncio.create_task(new_get_coro)
-                        pending.add(new_get_task)
-                    else:
+                    if user_id is not None:
                         user = self._get_user(user_id) or user_id
                         yield user, timestamp, pcm
 
