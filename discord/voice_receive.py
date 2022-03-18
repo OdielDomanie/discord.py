@@ -58,7 +58,6 @@ class VoiceReceiver:
         self._jitterbuffers: dict[int, PriorityQueue[tuple[ModularInt32, int, bytes]]] = {}
 
         self._decoders: dict[int, opus.Decoder] = {}  # {ssrc: Decoder}
-        self._get_user_locks: dict[int, asyncio.Lock] = {}
         self._write_events: dict[int, asyncio.Event] = {}  # Notified per ssrc
         self._write_event = asyncio.Event()  # Notified for every write
         self._last_written: int | None = None  # last written ssrc
@@ -67,6 +66,7 @@ class VoiceReceiver:
         self._get_lock = asyncio.Lock()
         self.ts_offsets: dict[int, float] = {}  # {ssrc: ts_offset} in seconds
         self.local_epoch: Union[float, None] = None
+        self.get_user_lock = asyncio.Lock()
 
     def write(self, time_stamp: int, ssrc: int, opusdata: bytes):
         """This should not be called by user code.
@@ -211,7 +211,7 @@ class VoiceReceiver:
     async def _get_from_user(self, user: User | Member | int) -> tuple[ModularInt32, bytes]:
         """Return the audio data of a user of duration at least FRAME_LENGTH.
         The gaps between the received packets are padded.
-        This method should only be called by one consumer.
+        This method should only be called by one consumer per user.
         """
         while True:
             if isinstance(user, int):
@@ -220,8 +220,10 @@ class VoiceReceiver:
                 ssrc = self._get_ssrc(user.id)
             if ssrc is None:
                 # Wait until we can actually get the ssrc.
-                await self._new_write_event.wait()
-                self._new_write_event.clear()
+                speak_recv =  self.voice_client.ws.speak_received
+                async with self.get_user_lock:
+                    await speak_recv.wait()
+                    speak_recv.clear()
                 continue
             else:
                 ssrc, timestamp, pcm = await self._get_from_ssrc(ssrc)

@@ -831,6 +831,7 @@ class DiscordVoiceWebSocket:
         if hook:
             self._hook = hook  # type: ignore - type-checker doesn't like overriding methods
         self.ssrc_map: dict[int, int] = {}  # {ssrc: user_id}
+        self.speak_received = asyncio.Event()
 
     async def _hook(self, *args: Any) -> None:
         pass
@@ -947,6 +948,7 @@ class DiscordVoiceWebSocket:
             user_id = int(data["user_id"])  # type: ignore
             speaking = data["speaking"]  # type: ignore
             self.ssrc_map[ssrc] = user_id
+            self.speak_received.set()
 
         await self._hook(self, msg)
 
