@@ -44,7 +44,6 @@ import socket
 import logging
 import struct
 import threading
-import time
 from typing import (
     Any,
     Callable,
@@ -55,13 +54,13 @@ from typing import (
     Union,
 )
 
-from . import aioudp, opus, utils
+from . import opus, utils
 from .backoff import ExponentialBackoff
 from .gateway import *
 from .errors import ClientException, ConnectionClosed
 from .player import AudioPlayer, AudioSource
 from .utils import MISSING
-from .voice_receive import VoiceReceiver
+from .voice_receive import VoiceReceiver, VoiceReceiveProtocol
 
 if TYPE_CHECKING:
     from .client import Client
@@ -252,7 +251,6 @@ class VoiceClient(VoiceProtocol):
         self.token: str = MISSING
         self.server_id: int = MISSING
         self.socket = MISSING
-        self._local_endpoint: aioudp.LocalEndpoint = MISSING
         self.loop: asyncio.AbstractEventLoop = state.loop
         self._state: ConnectionState = state
         # this will be used in the AudioPlayer thread
@@ -273,11 +271,9 @@ class VoiceClient(VoiceProtocol):
         self.encoder: Encoder = MISSING
         self._lite_nonce: int = 0
         self.ws: DiscordVoiceWebSocket = MISSING
-        self._receiving = False  # Whether the received voice data is buffered rather than discarded.
         # Incremented whenever audio data is recieved, reset when the connection is renewed
         self._recv_sequence: Optional[int] = None
-        self._vr: VoiceReceiver = MISSING
-        self._receive_loop_task = MISSING
+        self._receive_t_p: Optional[tuple[asyncio.BaseTransport, VoiceReceiveProtocol]] = None
 
     warn_nacl: bool = not has_nacl
     supported_modes: Tuple[SupportedModes, ...] = (
@@ -559,7 +555,7 @@ class VoiceClient(VoiceProtocol):
         encrypt_packet = getattr(self, '_encrypt_' + self.mode)
         return encrypt_packet(header, data)
 
-    def _unpack_voice_packet(self, packet: bytes, mode: str) -> tuple[int, int, bytes]:
+    def unpack_voice_packet(self, packet: bytes, mode: str) -> tuple[int, int, bytes]:
         """Takes a voice packet, and returns a tuple of timestamp, SSRC, and unencrypted audio payload.
         mode is the encryption mode. Can raise CryptoError, or ValueError if the packet is not a supported voice packet.
         """
@@ -770,60 +766,35 @@ class VoiceClient(VoiceProtocol):
 
         self.checked_add('timestamp', opus.Encoder.SAMPLES_PER_FRAME, 4294967295)
 
-    async def _receive_audio_packet(self):
-        """Receive an audio packet and write it to the VoiceReceive instance.
-        Can raise CryptoError or ValueError. `start_receiving` method needs to be called first.
-        """
-        assert self._receiving
-        packet, address = await self._local_endpoint.receive()
-        # TODO: Check the address.
-
-        self._vr.write(*self._unpack_voice_packet(packet, self.mode))
-
-    async def _receive_loop(self):
-        while True:
-            try:
-                await self._receive_audio_packet()
-            except nacl.secret.exc.CryptoError as e:
-                # TODO: Log warning
-                _log.error(e)
-                pass
-            except ValueError as e:
-                pass
-            except Exception as e:
-                _log.exception(e)
-                pass
-
     async def start_receiving(self, min_buffer=100, buffer=60) -> VoiceReceiver:
         """Start receiving audio from the voice channel. Returns a VoiceReceive instance."""
         # TODO: Docstring
         # TODO: Change exception types
-        # TODO: More checks, eg. if we are in a channel
-        # TODO: Stop at disconnect, don't stop at successful reconnect.
-        assert not self._receiving
-        assert self._receive_loop_task is MISSING
 
-        loop = asyncio.get_event_loop()
-        endpoint = aioudp.LocalEndpoint()
-        await loop.create_datagram_endpoint(
-            lambda: aioudp.DatagramEndpointProtocol(endpoint),
-            sock=self.socket,
-        )
-        self._local_endpoint = endpoint
+        vr = VoiceReceiver(self, buffer, min_buffer)
+        if self._receive_t_p is None:
+            loop = asyncio.get_event_loop()
+            transport, protocol = await loop.create_datagram_endpoint(
+                lambda: VoiceReceiveProtocol(vr),
+                sock=self.socket.dup(),
+            )
+            self._receive_t_p = (transport, protocol)
+        else:
+            transport, protocol = self._receive_t_p
+            assert protocol.vr is None, "Already receiving audio."
+            protocol.vr = vr
 
-        self._vr = VoiceReceiver(self, buffer, min_buffer)
-        self._receive_loop_task = asyncio.create_task(self._receive_loop())
-        self._receiving = True
-
-        return self._vr
+        _log.info("Started receiving voice.")
+        return vr
 
     def stop_receiving(self):
         "Stop receiving audio."
-        self._vr = MISSING
-        self._receive_loop_task.cancel()
-        self._local_endpoint.close()
+        self._recv_sequence = None
+        if self._receive_t_p is not None:
+            self._receive_t_p[0].close()
+            _log.info(f"Stopped receiving voice in {self.channel}")
 
     @property
     def voice_receiver(self):
         "Return the Voice Receiver object, or None if voice is not currently being recorded."
-        return self._vr or None
+        return self._receive_t_p and self._receive_t_p[1].vr

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from asyncio import PriorityQueue, Queue, QueueEmpty
+from asyncio import transports
 import functools
 import logging
 import time
 from typing import (
+    Any,
     AsyncGenerator,
     AsyncIterable,
     AsyncIterator,
@@ -15,6 +17,8 @@ from typing import (
     Union,
 )
 
+import nacl.secret  # type: ignore
+
 from . import opus
 from .utils import ModularInt32
 
@@ -23,13 +27,10 @@ if TYPE_CHECKING:
     from .user import User
     from .voice_client import VoiceClient
 
-__all__ = (
-    'VoiceReceiver',
-)
+__all__ = ('VoiceReceiver',)
 
 
 _log = logging.getLogger(__name__)
-
 
 
 class VoiceReceiver:
@@ -331,8 +332,13 @@ class VoiceReceiver:
 
                 if done:
                     # no silence timeout
-                    done_task = done.pop()
-                    if done_task is time_limit:
+                    break_ = False
+
+                    if len(done) == 2:  # Both the time_limit and the get_task completed.
+                        done.remove(time_limit)
+                        break_ = True
+
+                    if (done_task := done.pop()) is time_limit:
                         # Stop iteration as we hit the duration limit.
                         # If the last part would be silence, it is not generated.
                         pending.pop().cancel()
@@ -351,6 +357,10 @@ class VoiceReceiver:
                                 last_duration = len(silence) // self.sample_size
 
                         yield timestamp, pcm
+
+                        if break_:  # The time_limit task is also completed.
+                            return
+
                         last_timestamp = timestamp
                         last_duration = len(pcm) // self.sample_size
                         tasks = pending
@@ -464,3 +474,32 @@ class VoiceReceiver:
         remainder = SILENCE_CHUNK % duration
         if remainder:
             yield self.generate_silence(remainder)
+
+
+class VoiceReceiveProtocol(asyncio.DatagramProtocol):
+    def __init__(self, vr: VoiceReceiver):
+        self.vr = vr
+        self.transport = None
+
+    def connection_made(self, transport: transports.DatagramTransport) -> None:
+        self.transport = transport
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        if exc is not None:
+            raise exc
+
+    def datagram_received(self, data: bytes, addr: tuple[str | Any, int]) -> None:
+        vc = self.vr.voice_client
+        try:
+            unpacked = vc.unpack_voice_packet(data, vc.mode)
+        except nacl.secret.exc.CryptoError as e:
+            _log.warning(e)
+        except ValueError:
+            pass
+        except Exception as e:
+            _log.exception(e)
+        else:
+            self.vr.write(*unpacked)
+
+    def error_received(self, exc: OSError) -> None:
+        _log.error(exc)
