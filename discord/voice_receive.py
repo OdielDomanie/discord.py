@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-from asyncio import PriorityQueue, Queue, QueueEmpty
 from asyncio import transports
+from collections import deque
 import functools
+import heapq
 import logging
 import struct
 import time
@@ -54,10 +55,8 @@ class VoiceReceiver:
         # Timestamps are in samples
 
         # Buffer of (timestamp, local timestamp, opus data)
-        Buffer = Queue[tuple[ModularInt32, int, bytes]]
-        self._Buffer = Buffer
-        self._long_buffers: dict[int, Buffer] = {}  # {ssrc: Buffer}
-        self._jitterbuffers: dict[int, PriorityQueue[tuple[ModularInt32, int, bytes]]] = {}
+        self._long_buffers: dict[int, deque[tuple[ModularInt32, int, bytes]]] = {}  # {ssrc: Buffer}
+        self._jitterbuffers: dict[int, list[tuple[ModularInt32, int, bytes]]] = {}
 
         self._decoders: dict[int, opus.Decoder] = {}  # {ssrc: Decoder}
         self._write_events: dict[int, asyncio.Event] = {}  # Notified per ssrc
@@ -81,17 +80,17 @@ class VoiceReceiver:
         ssrc_write_event.set()
         self._write_event.set()
         self._last_written = ssrc
-        queue = self._long_buffers.setdefault(ssrc, self._Buffer(self.maxsize))
-        heap = self._jitterbuffers.setdefault(ssrc, PriorityQueue(self.min_buffer))
+        queue = self._long_buffers.setdefault(ssrc, deque())
+        heap = self._jitterbuffers.setdefault(ssrc, [])
 
         local_now = time.monotonic_ns() // 10**6
         time_stamp = ModularInt32(time_stamp)
         item = (time_stamp, local_now, opusdata)
-        if not heap.full():
-            heap.put_nowait(item)
+        if len(heap) < self.min_buffer:
+            heapq.heappush(heap, item)
         else:
-            if not queue.full():
-                queue.put_nowait(item)
+            if len(queue) < self.maxsize:
+                queue.append(item)
             else:
                 # The buffer is full. Drop it.
                 return
@@ -122,13 +121,12 @@ class VoiceReceiver:
 
     def _get_audio(self, ssrc) -> tuple[ModularInt32, bytes]:
         "Return decoded and padded audio pcm from the heap."
-        queue = self._long_buffers.setdefault(ssrc, Queue(self.maxsize))
-        heap = self._jitterbuffers.setdefault(ssrc, PriorityQueue(self.min_buffer))
-        timestamp, local_timestamp, enc_audio = heap.get_nowait()
-        try:
-            heap.put_nowait(queue.get_nowait())
-        except QueueEmpty:
-            pass
+        queue = self._long_buffers.setdefault(ssrc, deque())
+        heap = self._jitterbuffers.setdefault(ssrc, [])
+        timestamp, local_timestamp, enc_audio = heapq.heappop(heap)
+        if len(queue) > 0:
+            heapq.heappush(heap, queue.popleft())
+
         decoder = self._decoders.setdefault(ssrc, opus.Decoder())
         last_timestamp, last_duration = self._last_timestamp.get(ssrc, (None, None))
 
@@ -232,9 +230,9 @@ class VoiceReceiver:
                 return timestamp, pcm
 
     async def _get_from_ssrc(self, ssrc: int) -> tuple[int, ModularInt32, bytes]:
-        heap = self._jitterbuffers.setdefault(ssrc, PriorityQueue(self.min_buffer))
+        heap = self._jitterbuffers.setdefault(ssrc, [])
 
-        if heap.full():
+        if len(heap) >= self.min_buffer:
             return ssrc, *self._get_audio(ssrc)
 
         else:
@@ -243,13 +241,11 @@ class VoiceReceiver:
             # When a period of silence happens, we need to flush what's left over in the heap without waiting too much.
             # When the packets start arriving again, we don't return immediately to let the heap fill back up.
             write_event = self._write_events.setdefault(ssrc, asyncio.Event())
-            while not heap.full():
-                if heap.empty():
+            while len(heap) < self.min_buffer:
+                if len(heap) == 0:
                     wait_time = None
                 else:
-                    # The hack of accessing the private member is necessary to get the next item in the heap without
-                    # popping.
-                    _, local_timestamp, _ = self._jitterbuffers[ssrc]._queue[0]  # type: ignore
+                    _, local_timestamp, _ = self._jitterbuffers[ssrc][0]
                     min_duration = self.min_buffer * self.FRAME_LENGTH / 1000
                     # If the min_duration is 0.100s, and the next packet arrived 0.700s ago, than wait 0.300s or until the
                     # heap is full, than return from the heap.
