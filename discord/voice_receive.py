@@ -72,6 +72,14 @@ class VoiceReceiver:
         """This should not be called by user code.
         Appends the audio data to the buffer, drops it if buffer is full.
         """
+        if ssrc not in self._write_events:
+            self._new_write_event.set()
+            self._write_events[ssrc] = asyncio.Event()
+        ssrc_write_event = self._write_events[ssrc]
+        ssrc_write_event.set()
+        self._write_event.set()
+        self._last_written = ssrc
+
         queue = self._long_buffers.setdefault(ssrc, self._Buffer(self.maxsize))
         heap = self._jitterbuffers.setdefault(ssrc, PriorityQueue(self.min_buffer))
 
@@ -86,14 +94,6 @@ class VoiceReceiver:
             else:
                 # The buffer is full. Drop it.
                 return
-
-        if ssrc not in self._write_events:
-            self._new_write_event.set()
-            self._write_events[ssrc] = asyncio.Event()
-        ssrc_write_event = self._write_events[ssrc]
-        ssrc_write_event.set()
-        self._write_event.set()
-        self._last_written = ssrc
 
         if self.local_epoch is None:
             self.local_epoch = time.monotonic()
@@ -219,10 +219,10 @@ class VoiceReceiver:
                 ssrc = self._get_ssrc(user)
             else:
                 ssrc = self._get_ssrc(user.id)
-
             if ssrc is None:
                 # Wait until we can actually get the ssrc.
                 await self._new_write_event.wait()
+                self._new_write_event.clear()
                 continue
             else:
                 ssrc, timestamp, pcm = await self._get_from_ssrc(ssrc)
