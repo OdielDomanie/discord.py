@@ -271,8 +271,6 @@ class VoiceClient(VoiceProtocol):
         self.encoder: Encoder = MISSING
         self._lite_nonce: int = 0
         self.ws: DiscordVoiceWebSocket = MISSING
-        # Incremented whenever audio data is recieved, reset when the connection is renewed
-        self._recv_sequence: Optional[int] = None
         self._receive_t_p: Optional[tuple[asyncio.BaseTransport, VoiceReceiveProtocol]] = None
 
     warn_nacl: bool = not has_nacl
@@ -555,47 +553,6 @@ class VoiceClient(VoiceProtocol):
         encrypt_packet = getattr(self, '_encrypt_' + self.mode)
         return encrypt_packet(header, data)
 
-    def unpack_voice_packet(self, packet: bytes, mode: str) -> tuple[int, int, bytes]:
-        """Takes a voice packet, and returns a tuple of timestamp, SSRC, and unencrypted audio payload.
-        mode is the encryption mode. Can raise CryptoError, or ValueError if the packet is not a supported voice packet.
-        """
-        # TODO: Optimize by reducing copy operations.
-
-        # https://www.rfcreader.com/#rfc3550_line548
-        vpxcc, mpt, sequence, timestamp, ssrc = struct.unpack("!BBHII", packet[:12])
-
-        v = vpxcc >> 6
-        p = (vpxcc >> 5) & 1
-        x = (vpxcc >> 4) & 1
-        cc = vpxcc & (2**4 - 1)
-        m = mpt >> 7
-        pt = mpt & (2**8 - 1)
-
-        # debug_string = (
-        #     f"v: {v}, p: {p}, x: {x}, cc: {cc}, m: {m}, pt: {pt}, seq: {sequence}, ts: {timestamp}, ssrc: {ssrc}"
-        # )
-
-        if not (v == 2 and p == 0 and cc == 0 and pt == 0x78):
-            raise ValueError("Unsupported packet.")
-
-        if self._recv_sequence is not None and (missing_packets := (sequence - self._recv_sequence - 1)):
-            # TODO: use this to warn about about dropped packets
-            pass
-        self._recv_sequence = sequence
-
-        decrypt_fun: Callable[[bytes], bytes] = getattr(self, "_decrypt_" + mode)
-        data = decrypt_fun(packet)
-
-        if x:  # Header extension present. It is contained within the encrypted portion.
-            x_profile, x_length = struct.unpack("!HH", data[:4])
-            header_ext = data[4 : 4 + 4 * x_length]
-            payload = data[4 + 4 * x_length :]
-            # debug_string_ext = f"x_profile: {x_profile}, x_length: {x_length}, header_ext: {header_ext}"
-        else:
-            payload = data
-
-        return timestamp, ssrc, payload
-
     def _encrypt_xsalsa20_poly1305(self, header: bytes, data) -> bytes:
         box = nacl.secret.SecretBox(bytes(self.secret_key))
         nonce = bytearray(24)
@@ -789,7 +746,6 @@ class VoiceClient(VoiceProtocol):
 
     def stop_receiving(self):
         "Stop receiving audio."
-        self._recv_sequence = None
         if self._receive_t_p is not None:
             self._receive_t_p[0].close()
             _log.info(f"Stopped receiving voice in {self.channel}")

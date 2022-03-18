@@ -5,12 +5,14 @@ from asyncio import PriorityQueue, Queue, QueueEmpty
 from asyncio import transports
 import functools
 import logging
+import struct
 import time
 from typing import (
     Any,
     AsyncGenerator,
     AsyncIterable,
     AsyncIterator,
+    Callable,
     Generator,
     Optional,
     TYPE_CHECKING,
@@ -465,7 +467,9 @@ class VoiceReceiver:
 class VoiceReceiveProtocol(asyncio.DatagramProtocol):
     def __init__(self, vr: VoiceReceiver):
         self.vr = vr
+        self.vc = vr.voice_client
         self.transport = None
+        self._recv_sequence: Optional[ModularInt32] = None
 
     def connection_made(self, transport: transports.DatagramTransport) -> None:
         self.transport = transport
@@ -477,7 +481,8 @@ class VoiceReceiveProtocol(asyncio.DatagramProtocol):
     def datagram_received(self, data: bytes, addr: tuple[str | Any, int]) -> None:
         vc = self.vr.voice_client
         try:
-            unpacked = vc.unpack_voice_packet(data, vc.mode)
+            ts, ssrc, x, data = self.unpack_voice_packet(data)
+            opus_data = self.decrypt(data, x)
         except nacl.secret.exc.CryptoError as e:
             _log.warning(e)
         except ValueError:
@@ -485,7 +490,54 @@ class VoiceReceiveProtocol(asyncio.DatagramProtocol):
         except Exception as e:
             _log.exception(e)
         else:
-            self.vr.write(*unpacked)
+            self.vr.write(ts, ssrc, opus_data)
 
     def error_received(self, exc: OSError) -> None:
         _log.error(exc)
+
+    def unpack_voice_packet(self, packet: bytes) -> tuple[int, int, int, bytes]:
+        """Takes a voice packet, and returns a tuple of timestamp, SSRC, extension header flag, and the passed packet back.
+        Can raise ValueError if the packet is not a supported voice packet.
+        """
+        # TODO: Optimize by reducing copy operations.
+
+        # https://www.rfcreader.com/#rfc3550_line548
+        vpxcc, mpt, sequence, timestamp, ssrc = struct.unpack("!BBHII", packet[:12])
+
+        v = vpxcc >> 6
+        p = (vpxcc >> 5) & 1
+        x = (vpxcc >> 4) & 1
+        cc = vpxcc & (2**4 - 1)
+        m = mpt >> 7
+        pt = mpt & (2**8 - 1)
+
+        # debug_string = (
+        #     f"v: {v}, p: {p}, x: {x}, cc: {cc}, m: {m}, pt: {pt}, seq: {sequence}, ts: {timestamp}, ssrc: {ssrc}"
+        # )
+
+        if not (v == 2 and p == 0 and cc == 0 and pt == 0x78):
+            raise ValueError("Unsupported packet.")
+
+        if self._recv_sequence is not None and (missing_packets := (sequence - self._recv_sequence - 1)):
+            # TODO: use this to warn about about dropped packets
+            pass
+        self._recv_sequence = sequence
+
+        return timestamp, ssrc, x, packet
+
+    def decrypt(self, packet: bytes, x, mode=...) -> bytes:
+        "Return the decrypted audio data. Can raise CryptoError."
+        if mode is ...:
+            mode = self.vc.mode
+        decrypt_fun: Callable[[bytes], bytes] = getattr(self.vc, "_decrypt_" + mode)
+        data = decrypt_fun(packet)
+
+        if x:  # Header extension present. It is contained within the encrypted portion.
+            x_profile, x_length = struct.unpack("!HH", data[:4])
+            header_ext = data[4 : 4 + 4 * x_length]
+            payload = data[4 + 4 * x_length :]
+            # debug_string_ext = f"x_profile: {x_profile}, x_length: {x_length}, header_ext: {header_ext}"
+        else:
+            payload = data
+
+        return payload
