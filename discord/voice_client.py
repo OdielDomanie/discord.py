@@ -731,6 +731,8 @@ class VoiceClient(VoiceProtocol):
         # TODO: Docstring
         # TODO: Change exception types
 
+        assert not self.voice_receiver, "Already recording."
+
         vr = VoiceReceiver(self, buffer, min_buffer, output_type)
         if self._receive_t_p is None:
             loop = asyncio.get_event_loop()
