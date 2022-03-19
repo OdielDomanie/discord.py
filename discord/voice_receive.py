@@ -282,11 +282,7 @@ class VoiceReceiver:
                     # has filled after this write event.
                     write_event.clear()  # Each resolved write_event.wait() must be followed by .clear()
 
-            try:
-                return ssrc, *self._get_audio(ssrc)
-            except BaseException as e:
-                _log.exception(e)
-                raise
+            return ssrc, *self._get_audio(ssrc)
 
     async def iterate_user(
         self,
