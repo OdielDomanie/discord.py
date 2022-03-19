@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 from asyncio import transports
 from collections import deque
-import functools
 import heapq
 import logging
 import struct
@@ -475,13 +474,13 @@ class VoiceReceiver:
         remainder = SILENCE_CHUNK % duration
         if remainder:
             yield self.generate_silence(remainder)
-    
+
     def is_silence(self, pcm: bytes) -> bool:
         return not sum(pcm)
-    
+
     def full(self, ssrc) -> bool:
         "If the buffer of the given ssrc is full."
-        return ssrc in self._long_buffers and len(self._long_buffers[ssrc]) >= self.maxsize 
+        return ssrc in self._long_buffers and len(self._long_buffers[ssrc]) >= self.maxsize
 
 
 class VoiceReceiveProtocol(asyncio.DatagramProtocol):
