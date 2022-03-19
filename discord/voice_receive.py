@@ -478,6 +478,10 @@ class VoiceReceiver:
     
     def is_silence(self, pcm: bytes) -> bool:
         return not sum(pcm)
+    
+    def full(self, ssrc) -> bool:
+        "If the buffer of the given ssrc is full."
+        return ssrc in self._long_buffers and len(self._long_buffers[ssrc]) >= self.maxsize 
 
 
 class VoiceReceiveProtocol(asyncio.DatagramProtocol):
@@ -498,6 +502,8 @@ class VoiceReceiveProtocol(asyncio.DatagramProtocol):
         vc = self.vr.voice_client
         try:
             ts, ssrc, x, data = self.unpack_voice_packet(data)
+            if self.vr.full(ssrc):
+                return
             opus_data = self.decrypt(data, x)
         except nacl.secret.exc.CryptoError as e:
             _log.warning(e)
