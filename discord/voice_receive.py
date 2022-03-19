@@ -475,6 +475,9 @@ class VoiceReceiver:
         remainder = SILENCE_CHUNK % duration
         if remainder:
             yield self.generate_silence(remainder)
+    
+    def is_silence(self, pcm: bytes) -> bool:
+        return not sum(pcm)
 
 
 class VoiceReceiveProtocol(asyncio.DatagramProtocol):
