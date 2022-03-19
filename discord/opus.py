@@ -377,6 +377,10 @@ class Encoder(_OpusStruct):
 
 
 class Decoder(_OpusStruct):
+
+    OUTPUT_TYPE = ctypes.c_int16
+    OUTPUT_TYPE_POINTER = c_int16_ptr
+
     def __init__(self):
         _OpusStruct.get_opus_version()
 
@@ -503,13 +507,24 @@ class Decoder(_OpusStruct):
             frame_size = frames * samples_per_frame
 
         channel_count = self.CHANNELS
-        pcm = (ctypes.c_int16 * (frame_size * channel_count * ctypes.sizeof(ctypes.c_int16)))()
-        pcm_ptr = ctypes.cast(pcm, c_int16_ptr)
+        pcm = (self.OUTPUT_TYPE * (frame_size * channel_count * ctypes.sizeof(self.OUTPUT_TYPE)))()
+        pcm_ptr = ctypes.cast(pcm, self.OUTPUT_TYPE_POINTER)
 
-        ret = _lib.opus_decode(self._state, data, len(data) if data else 0, pcm_ptr, frame_size, fec)
+        type_code = "h" if self.OUTPUT_TYPE is ctypes.c_int16 else "f"
+        
+        opus_decode = _lib.opus_decode if type_code == "h" else _lib.opus_decode_float
+        ret = opus_decode(self._state, data, len(data) if data else 0, pcm_ptr, frame_size, fec)
 
-        return array.array('h', pcm[: ret * channel_count]).tobytes()
+        return array.array(type_code, pcm[: ret * channel_count]).tobytes()
     
     def pcm_size(self, duration: int):
         "Get the pcm output size in bytes given duration in ms."
         return self.SAMPLE_SIZE * self.SAMPLING_RATE * duration // 1000
+
+
+class DecoderFloat(Decoder):
+    "Decoder that outputs in float instead of signed int16"
+    SAMPLE_SIZE = struct.calcsize('f') * Decoder.CHANNELS
+    FRAME_SIZE = Decoder.SAMPLES_PER_FRAME * SAMPLE_SIZE
+    OUTPUT_TYPE = ctypes.c_float
+    OUTPUT_TYPE_POINTER = c_float_ptr
