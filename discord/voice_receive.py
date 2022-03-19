@@ -68,6 +68,7 @@ class VoiceReceiver:
         self.ts_offsets: dict[int, float] = {}  # {ssrc: ts_offset} in seconds
         self.local_epoch: Union[float, None] = None
         self.get_user_lock = asyncio.Lock()
+        self._user_last_ssrc: dict[int, int] = {}  # {user_id: ssrc} Last ssrc of the user.
 
     def write(self, time_stamp: int, ssrc: int, opusdata: bytes):
         """This should not be called by user code.
@@ -105,11 +106,8 @@ class VoiceReceiver:
         "Return the user id associated with the ssrc."
         return self.voice_client.ws.ssrc_map.get(ssrc)
 
-    def _get_ssrc(self, user_id: int) -> int | None:
-        return next(
-            (ssrc for ssrc, user in self.voice_client.ws.ssrc_map.items() if user == user_id),
-            None,
-        )
+    def _get_ssrc(self, user_id: int) -> list[int]:
+        return [ssrc for ssrc, user in self.voice_client.ws.ssrc_map.items() if user == user_id]
 
     def _get_user(self, user_id: int) -> Member | User | None:
         member = self.voice_client.guild.get_member(user_id)
@@ -199,26 +197,48 @@ class VoiceReceiver:
             # This voice packet is before the last one or at the same time.
             return last_timestamp + last_duration, b""  # type: ignore
 
-    async def _get_from_user(self, user: User | Member | int) -> tuple[ModularInt32, bytes]:
+    async def _get_from_user(self, user: User | Member | int) -> tuple[ModularInt32, bytes] | None:
         """Return the audio data of a user of duration at least FRAME_LENGTH.
         The gaps between the received packets are padded.
         This method should only be called by one consumer per user.
         """
         while True:
-            if isinstance(user, int):
-                ssrc = self._get_ssrc(user)
-            else:
-                ssrc = self._get_ssrc(user.id)
-            if ssrc is None:
+            user_id = user if isinstance(user, int) else user.id
+            ssrcs = self._get_ssrc(user_id)
+            if not ssrcs:
                 # Wait until we can actually get the ssrc.
-                speak_recv =  self.voice_client.ws.speak_received
+                speak_recv = self.voice_client.ws.speak_received
                 async with self.get_user_lock:
                     await speak_recv.wait()
                     speak_recv.clear()
                 continue
             else:
-                ssrc, timestamp, pcm = await self._get_from_ssrc(ssrc)
-                return timestamp, pcm
+                # If there are multiple ssrc values, that is because the user has reconnected.
+                # In this case, first empty the older buffers. If the buffers but the last one is empty, wait on the last
+                # ssrc key. _get_ssrc returns ssrc values in the order of the received SPEAK messages.
+                for ssrc in ssrcs:
+                    if self._jitterbuffers.get(ssrc) or ssrc == ssrcs[-1]:
+
+                        if user_id in self._user_last_ssrc and ssrc != self._user_last_ssrc.get(user_id):
+                            # The user has a new ssrc.
+                            del self._user_last_ssrc[user_id]
+                            return
+
+                        get_from_ssrc_task = asyncio.create_task(self._get_from_ssrc(ssrc))
+                        speak_event_wait = asyncio.create_task(self.voice_client.ws.speak_received.wait())
+                        done, pending = await asyncio.wait(
+                            (get_from_ssrc_task, speak_event_wait),
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if speak_event_wait in done:  # A new SPEAK msg is received.
+                            self.voice_client.ws.speak_received.clear()
+                        if get_from_ssrc_task in done:
+                            ssrc, timestamp, pcm = get_from_ssrc_task.result()
+                            self._user_last_ssrc[user_id] = ssrc
+                            return timestamp, pcm
+                        else:  # A new SPEAK msg is received and get task is not completed.
+                            pending.pop().cancel()
+                            break
 
     async def _get_from_ssrc(self, ssrc: int) -> tuple[int, ModularInt32, bytes]:
         heap = self._jitterbuffers.setdefault(ssrc, [])
@@ -241,7 +261,7 @@ class VoiceReceiver:
                     # If the min_duration is 0.100s, and the next packet arrived 0.700s ago, than wait 0.300s or until the
                     # heap is full, than return from the heap.
                     wait_time = min_duration - (time.monotonic() - local_timestamp / 1000)
-                
+
                 try:
                     await asyncio.wait_for(write_event.wait(), timeout=wait_time)
                 except asyncio.TimeoutError:
@@ -266,8 +286,9 @@ class VoiceReceiver:
         silence_timeout: Optional[float] = None,
         fill_silence=True,
     ) -> AsyncIterable[tuple[ModularInt32, bytes]]:
-        """Yield timestamp, voice data of the given user. Stop after `duration` if not None.
-        Stop after a period of silence of `silence_timeout`, if not None.
+        """Yields timestamp, voice data of the given user. Stops after `duration` if not None.
+        Stops after a period of silence of `silence_timeout`, if not None.
+        Stops if the user reconnects.
         If `fill_silence` is true, gaps in the audio is yielded as silence. This makes the total duration returned
         consistent with how much time has passed.
         If the last part of the audio is silence, it is not yielded.
@@ -281,7 +302,10 @@ class VoiceReceiver:
                 except asyncio.TimeoutError:
                     return
                 else:
-                    timestamp, pcm = get_task.result()
+                    result = get_task.result()
+                    if not result:
+                        return
+                    timestamp, pcm = result
 
                     # If gap is non-zero, fill the gaps with silence
                     if fill_silence and not (last_timestamp is None or last_duration is None):
@@ -323,7 +347,10 @@ class VoiceReceiver:
                         pending.pop().cancel()
                         return
                     else:
-                        timestamp, pcm = done_task.result()
+                        result = done_task.result()
+                        if not result:
+                            return
+                        timestamp, pcm = result
 
                         # If gap is non-zero, fill the gaps with silence.
                         if fill_silence and not (last_timestamp is None or last_duration is None):
@@ -351,13 +378,12 @@ class VoiceReceiver:
 
     def reset_user(self, user: User | Member | int):
         "Reset the state of a user."
-        ssrc = self._get_ssrc(user if isinstance(user, int) else user.id)
-        if ssrc is None:
-            return
-        del self._long_buffers[ssrc]
-        del self._jitterbuffers[ssrc]
-        del self._decoders[ssrc]
-        del self._last_timestamp[ssrc]
+        ssrcs = self._get_ssrc(user if isinstance(user, int) else user.id)
+        for ssrc in ssrcs:
+            del self._long_buffers[ssrc]
+            del self._jitterbuffers[ssrc]
+            del self._decoders[ssrc]
+            del self._last_timestamp[ssrc]
 
     def __enter__(self):
         return self
