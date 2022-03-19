@@ -199,15 +199,6 @@ class VoiceReceiver:
             # This voice packet is before the last one or at the same time.
             return last_timestamp + last_duration, b""  # type: ignore
 
-    @staticmethod
-    def _lock(method):
-        @functools.wraps(method)
-        async def lock(self, *args, **kwargs):
-            async with self._get_lock:
-                return await method(self, *args, *kwargs)
-
-        return lock
-
     async def _get_from_user(self, user: User | Member | int) -> tuple[ModularInt32, bytes]:
         """Return the audio data of a user of duration at least FRAME_LENGTH.
         The gaps between the received packets are padded.
