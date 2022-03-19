@@ -48,6 +48,7 @@ from typing import (
     Any,
     Callable,
     List,
+    Literal,
     Optional,
     TYPE_CHECKING,
     Tuple,
@@ -723,12 +724,14 @@ class VoiceClient(VoiceProtocol):
 
         self.checked_add('timestamp', opus.Encoder.SAMPLES_PER_FRAME, 4294967295)
 
-    async def start_receiving(self, min_buffer=100, buffer=60) -> VoiceReceiver:
+    async def start_receiving(
+        self, min_buffer=100, buffer=60, output_type: Literal["int16", "float"] = "int16"
+    ) -> VoiceReceiver:
         """Start receiving audio from the voice channel. Returns a VoiceReceive instance."""
         # TODO: Docstring
         # TODO: Change exception types
 
-        vr = VoiceReceiver(self, buffer, min_buffer)
+        vr = VoiceReceiver(self, buffer, min_buffer, output_type)
         if self._receive_t_p is None:
             loop = asyncio.get_event_loop()
             transport, protocol = await loop.create_datagram_endpoint(

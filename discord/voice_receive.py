@@ -14,6 +14,7 @@ from typing import (
     AsyncIterator,
     Callable,
     Generator,
+    Literal,
     Optional,
     TYPE_CHECKING,
     Union,
@@ -40,7 +41,9 @@ class VoiceReceiver:
     FRAME_LENGTH = opus.Decoder.FRAME_LENGTH
     SAMPLING_RATE = opus.Decoder.SAMPLING_RATE
 
-    def __init__(self, vc: VoiceClient, buffer_duration=60, min_buffer=100):
+    def __init__(
+        self, vc: VoiceClient, buffer_duration=60, min_buffer=100, output_type: Literal["int16", "float"] = "int16"
+    ):
         """`buffer_duration` is the long buffer in approximate seconds.
         `min_buffer` is the jitter buffer in approximate milliseconds.
         """
@@ -49,7 +52,14 @@ class VoiceReceiver:
         self.maxsize = (buffer_duration * 1000) // self.FRAME_LENGTH  # Is this an OK assumption?
         self.min_buffer = min_buffer // self.FRAME_LENGTH
 
-        self.sample_size = opus.Decoder.SAMPLE_SIZE
+        if output_type == "int16":
+            self._Decoder = opus.Decoder
+        elif output_type == "float":
+            self._Decoder = opus.DecoderFloat
+        else:
+            raise ValueError("Invalid output type.")
+
+        self.sample_size = self._Decoder.SAMPLE_SIZE
 
         # Timestamps are in samples
 
@@ -124,7 +134,7 @@ class VoiceReceiver:
         if len(queue) > 0:
             heapq.heappush(heap, queue.popleft())
 
-        decoder = self._decoders.setdefault(ssrc, opus.Decoder())
+        decoder = self._decoders.setdefault(ssrc, self._Decoder())
         last_timestamp, last_duration = self._last_timestamp.get(ssrc, (None, None))
 
         nb_frames = decoder.packet_get_nb_frames(enc_audio)
@@ -457,11 +467,11 @@ class VoiceReceiver:
 
     def get_duration(self, pcm_audio: bytes) -> float:
         "Return the duration in seconds of the audio returned by this object."
-        return len(pcm_audio) / opus.Decoder.SAMPLE_SIZE / self.SAMPLING_RATE
+        return len(pcm_audio) / self._Decoder.SAMPLE_SIZE / self.SAMPLING_RATE
 
     def generate_silence(self, duration: int) -> bytes:
         "Duration is in samples. Return silence."
-        return b"\x00" * opus.Decoder.SAMPLE_SIZE * duration
+        return b"\x00" * self._Decoder.SAMPLE_SIZE * duration
 
     def _silenceiterator(self, duration: int) -> Generator[bytes, None, None]:
         "`duration` is in samples."
