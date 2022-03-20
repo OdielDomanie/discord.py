@@ -241,12 +241,17 @@ class VoiceReceiver:
                         )
                         if speak_event_wait in done:  # A new SPEAK msg is received.
                             self.voice_client.ws.speak_received.clear()
-                        if get_from_ssrc_task in done:
+                        else:  # Get task is completed but .wait() is still pending
+                            speak_event_wait.cancel()
+                            await asyncio.gather(speak_event_wait, return_exceptions=True)  # Await its cancellation.
+                        if get_from_ssrc_task in done:  # Get task is completed
                             ssrc, timestamp, pcm = get_from_ssrc_task.result()
                             self._user_last_ssrc[user_id] = ssrc
                             return timestamp, pcm
                         else:  # A new SPEAK msg is received and get task is not completed.
-                            pending.pop().cancel()
+                            get_task = pending.pop()
+                            get_task.cancel()
+                            await asyncio.gather(get_task, return_exceptions=True)  # Await its cancellation.
                             break
 
     async def _get_from_ssrc(self, ssrc: int) -> tuple[int, ModularInt32, bytes]:
@@ -411,7 +416,13 @@ class VoiceReceiver:
         tasks.add(new_write_wait)
 
         while True:
-            done, pending = await asyncio.wait(tasks, timeout=None, return_when=asyncio.FIRST_COMPLETED)
+            try:
+                done, pending = await asyncio.wait(tasks, timeout=None, return_when=asyncio.FIRST_COMPLETED)
+            except asyncio.CancelledError:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
 
             if done:  # no timeout
 
