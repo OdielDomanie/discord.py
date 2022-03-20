@@ -37,20 +37,12 @@ _log = logging.getLogger(__name__)
 
 
 class VoiceReceiver:
-
-    FRAME_LENGTH = opus.Decoder.FRAME_LENGTH
-    SAMPLING_RATE = opus.Decoder.SAMPLING_RATE
-
     def __init__(
         self, vc: VoiceClient, buffer_duration=60, min_buffer=100, output_type: Literal["int16", "float"] = "int16"
     ):
         """`buffer_duration` is the long buffer in approximate seconds.
         `min_buffer` is the jitter buffer in approximate milliseconds.
         """
-
-        self.voice_client = vc
-        self.maxsize = (buffer_duration * 1000) // self.FRAME_LENGTH  # Is this an OK assumption?
-        self.min_buffer = min_buffer // self.FRAME_LENGTH
 
         if output_type == "int16":
             self._Decoder = opus.Decoder
@@ -60,6 +52,12 @@ class VoiceReceiver:
             raise ValueError("Invalid output type.")
 
         self.sample_size = self._Decoder.SAMPLE_SIZE
+        self.frame_length = self._Decoder.FRAME_LENGTH
+        self.sampling_rate = self._Decoder.SAMPLING_RATE
+
+        self.voice_client = vc
+        self.maxsize = (buffer_duration * 1000) // self.frame_length  # Is this an OK assumption?
+        self.min_buffer = min_buffer // self.frame_length
 
         # Timestamps are in samples
 
@@ -154,7 +152,7 @@ class VoiceReceiver:
 
         # Limit how much silence we can generate.
         # Making this too much can result in segmentation error.
-        MAX_GAP = self.SAMPLING_RATE // 2
+        MAX_GAP = self.sampling_rate // 2
         gap = min(gap, MAX_GAP)
         if gap >= 0:
             if gap > 0:
@@ -277,7 +275,7 @@ class VoiceReceiver:
                     wait_time = None
                 else:
                     _, local_timestamp, _ = self._jitterbuffers[ssrc][0]
-                    min_duration = self.min_buffer * self.FRAME_LENGTH / 1000
+                    min_duration = self.min_buffer * self.frame_length / 1000
                     # If the min_duration is 0.100s, and the next packet arrived 0.700s ago, than wait 0.300s or until the
                     # heap is full, than return from the heap.
                     wait_time = min_duration - (time.monotonic() - local_timestamp / 1000)
@@ -485,7 +483,7 @@ class VoiceReceiver:
 
     def get_duration(self, pcm_audio: bytes) -> float:
         "Return the duration in seconds of the audio returned by this object."
-        return len(pcm_audio) / self._Decoder.SAMPLE_SIZE / self.SAMPLING_RATE
+        return len(pcm_audio) / self._Decoder.SAMPLE_SIZE / self.sampling_rate
 
     def generate_silence(self, duration: int) -> bytes:
         "Duration is in samples. Return silence."
@@ -493,11 +491,11 @@ class VoiceReceiver:
 
     def _silenceiterator(self, duration: int) -> Generator[bytes, None, None]:
         "`duration` is in samples."
-        duration = min(duration, self.max_silence * self._Decoder.SAMPLING_RATE)
+        duration = min(duration, self.max_silence * self.sampling_rate)
         if duration == 0:
             return
 
-        SILENCE_CHUNK = self.SAMPLING_RATE // 2  # 0.5 seconds
+        SILENCE_CHUNK = self.sampling_rate // 2  # 0.5 seconds
         for _ in range(duration // SILENCE_CHUNK):
             yield self.generate_silence(SILENCE_CHUNK)
         remainder = SILENCE_CHUNK % duration
