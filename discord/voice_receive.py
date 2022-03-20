@@ -207,7 +207,7 @@ class VoiceReceiver:
             return last_timestamp + last_duration, b""  # type: ignore
 
     async def _get_from_user(self, user: User | Member | int) -> tuple[ModularInt32, bytes] | None:
-        """Return the audio data of a user of duration at least FRAME_LENGTH.
+        """Return the audio data of a user of duration at least FRAME_LENGTH, or None if the user reconnects.
         The gaps between the received packets are padded.
         This method should only be called by one consumer per user.
         """
