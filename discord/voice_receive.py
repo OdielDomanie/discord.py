@@ -78,6 +78,7 @@ class VoiceReceiver:
         self.local_epoch: Union[float, None] = None
         self.get_user_lock = asyncio.Lock()
         self._user_last_ssrc: dict[int, int] = {}  # {user_id: ssrc} Last ssrc of the user.
+        self._get_any_iterator = None
 
     def write(self, time_stamp: int, ssrc: int, opusdata: bytes):
         """This should not be called by user code.
@@ -404,7 +405,12 @@ class VoiceReceiver:
     def __aiter__(self):
         return self()
 
-    async def _get_any(self) -> AsyncGenerator[tuple[Member | User | int, ModularInt32, bytes], None]:
+    def _get_any(self) -> AsyncIterator[tuple[Member | User | int, ModularInt32, bytes]]:
+        if self._get_any_iterator is None:
+            self._get_any_iterator = self._get_any_gen()
+        return self._get_any_iterator
+
+    async def _get_any_gen(self) -> AsyncGenerator[tuple[Member | User | int, ModularInt32, bytes], None]:
         """Yield from any user, or wait until one is available."""
         tasks: set[asyncio.Task] = set()
         for ssrc in self._write_events:
