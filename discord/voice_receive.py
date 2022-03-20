@@ -80,6 +80,11 @@ class VoiceReceiver:
         self._user_last_ssrc: dict[int, int] = {}  # {user_id: ssrc} Last ssrc of the user.
         self._get_any_iterator = None
 
+        # Public field
+        # Maximum continous silence that can be generated in seconds, to prevent accidently writing very large files due to
+        # a library bug or some user error.
+        self.max_silence = 10 * 60
+
     def write(self, time_stamp: int, ssrc: int, opusdata: bytes):
         """This should not be called by user code.
         Appends the audio data to the buffer, drops it if buffer is full.
@@ -488,6 +493,7 @@ class VoiceReceiver:
 
     def _silenceiterator(self, duration: int) -> Generator[bytes, None, None]:
         "`duration` is in samples."
+        duration = min(duration, self.max_silence * self._Decoder.SAMPLING_RATE)
         if duration == 0:
             return
 
