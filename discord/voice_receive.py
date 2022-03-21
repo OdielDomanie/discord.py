@@ -55,6 +55,7 @@ class VoiceReceiver:
         self.sample_size = self._Decoder.SAMPLE_SIZE
         self.frame_length = self._Decoder.FRAME_LENGTH
         self.sampling_rate = self._Decoder.SAMPLING_RATE
+        self.channels = self._Decoder.CHANNELS
 
         self.voice_client = vc
         self.maxsize = (buffer_duration * 1000) // self.frame_length  # Is this an OK assumption?
