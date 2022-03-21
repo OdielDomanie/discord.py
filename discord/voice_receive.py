@@ -23,6 +23,7 @@ from typing import (
 import nacl.secret  # type: ignore
 
 from . import opus
+from .object import Object
 from .utils import ModularInt32
 
 if TYPE_CHECKING:
@@ -122,13 +123,13 @@ class VoiceReceiver:
     def _get_ssrc(self, user_id: int) -> list[int]:
         return [ssrc for ssrc, user in self.voice_client.ws.ssrc_map.items() if user == user_id]
 
-    def _get_user(self, user_id: int) -> Member | User | None:
-        member = self.voice_client.guild.get_member(user_id)
-        if member is not None:
+    def _get_user(self, user_id: int) -> Member | User | Object:
+        if (member := self.voice_client.guild.get_member(user_id)):
             return member
-        else:
-            user = self.voice_client.client.get_user(user_id)
+        elif (user := self.voice_client.client.get_user(user_id)):
             return user
+        else:
+            return Object(user_id)
 
     def _get_audio(self, ssrc) -> tuple[ModularInt32, bytes]:
         "Return decoded and padded audio pcm from the heap."
@@ -210,14 +211,13 @@ class VoiceReceiver:
             # This voice packet is before the last one or at the same time.
             return last_timestamp + last_duration, b""  # type: ignore
 
-    async def _get_from_user(self, user: User | Member | int) -> tuple[ModularInt32, bytes] | None:
+    async def _get_from_user(self, user: User | Member | Object) -> tuple[ModularInt32, bytes] | None:
         """Return the audio data of a user of duration at least FRAME_LENGTH, or None if the user reconnects.
         The gaps between the received packets are padded.
         This method should only be called by one consumer per user.
         """
         while True:
-            user_id = user if isinstance(user, int) else user.id
-            ssrcs = self._get_ssrc(user_id)
+            ssrcs = self._get_ssrc(user.id)
             if not ssrcs:
                 # Wait until we can actually get the ssrc.
                 speak_recv = self.voice_client.ws.speak_received
@@ -232,9 +232,9 @@ class VoiceReceiver:
                 for ssrc in ssrcs:
                     if self._jitterbuffers.get(ssrc) or ssrc == ssrcs[-1]:
 
-                        if user_id in self._user_last_ssrc and ssrc != self._user_last_ssrc.get(user_id):
+                        if user.id in self._user_last_ssrc and ssrc != self._user_last_ssrc.get(user.id):
                             # The user has a new ssrc.
-                            del self._user_last_ssrc[user_id]
+                            del self._user_last_ssrc[user.id]
                             return
 
                         get_from_ssrc_task = asyncio.create_task(self._get_from_ssrc(ssrc))
@@ -250,7 +250,7 @@ class VoiceReceiver:
                             await asyncio.gather(speak_event_wait, return_exceptions=True)  # Await its cancellation.
                         if get_from_ssrc_task in done:  # Get task is completed
                             ssrc, timestamp, pcm = get_from_ssrc_task.result()
-                            self._user_last_ssrc[user_id] = ssrc
+                            self._user_last_ssrc[user.id] = ssrc
                             return timestamp, pcm
                         else:  # A new SPEAK msg is received and get task is not completed.
                             get_task = pending.pop()
@@ -295,7 +295,7 @@ class VoiceReceiver:
 
     async def iterate_user(
         self,
-        user: User | Member | int,
+        user: User | Member | Object,
         duration: Optional[float] = None,
         silence_timeout: Optional[float] = None,
         fill_silence=True,
@@ -390,9 +390,9 @@ class VoiceReceiver:
                     # silence timeout
                     return
 
-    def reset_user(self, user: User | Member | int):
+    def reset_user(self, user: User | Member | Object):
         "Reset the state of a user."
-        ssrcs = self._get_ssrc(user if isinstance(user, int) else user.id)
+        ssrcs = self._get_ssrc(user.id)
         for ssrc in ssrcs:
             del self._long_buffers[ssrc]
             del self._jitterbuffers[ssrc]
@@ -408,12 +408,12 @@ class VoiceReceiver:
     def __aiter__(self):
         return self()
 
-    def _get_any(self) -> AsyncIterator[tuple[Member | User | int, ModularInt32, bytes]]:
+    def _get_any(self) -> AsyncIterator[tuple[Member | User | Object, ModularInt32, bytes]]:
         if self._get_any_iterator is None:
             self._get_any_iterator = self._get_any_gen()
         return self._get_any_iterator
 
-    async def _get_any_gen(self) -> AsyncGenerator[tuple[Member | User | int, ModularInt32, bytes], None]:
+    async def _get_any_gen(self) -> AsyncGenerator[tuple[Member | User | Object, ModularInt32, bytes], None]:
         """Yield from any user, or wait until one is available."""
         tasks: set[asyncio.Task] = set()
         for ssrc in self._write_events:
@@ -453,7 +453,7 @@ class VoiceReceiver:
                     ssrc, timestamp, pcm = done_task.result()
                     user_id = self._get_user_id(ssrc)
                     if user_id is not None:
-                        user = self._get_user(user_id) or user_id
+                        user = self._get_user(user_id)
                         yield user, timestamp, pcm
 
                     done.update(pending)
@@ -462,7 +462,7 @@ class VoiceReceiver:
                     done.add(get_task)
                     tasks = done
 
-    def __call__(self, timeout: Optional[float] = None) -> AsyncIterator[tuple[Member | User | int, ModularInt32, bytes]]:
+    def __call__(self, timeout: Optional[float] = None) -> AsyncIterator[tuple[Member | User | Object, ModularInt32, bytes]]:
 
         if timeout is None:
             return self._get_any()
