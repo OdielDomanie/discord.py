@@ -20,7 +20,10 @@ from typing import (
     Union,
 )
 
-import nacl.secret  # type: ignore
+try:
+    import nacl.secret  # type: ignore
+except ImportError:
+    pass
 
 from . import opus
 from .object import Object
