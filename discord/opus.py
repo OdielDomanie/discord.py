@@ -468,7 +468,7 @@ class Decoder(_OpusStruct):
         *,
         fec: Literal[False],
         missing_duration: Optional[int] = None,
-        ) -> bytes:
+    ) -> bytes:
         ...
 
     def decode(
@@ -511,12 +511,12 @@ class Decoder(_OpusStruct):
         pcm_ptr = ctypes.cast(pcm, self.OUTPUT_TYPE_POINTER)
 
         type_code = "h" if self.OUTPUT_TYPE is ctypes.c_int16 else "f"
-        
+
         opus_decode = _lib.opus_decode if type_code == "h" else _lib.opus_decode_float
         ret = opus_decode(self._state, data, len(data) if data else 0, pcm_ptr, frame_size, fec)
 
         return array.array(type_code, pcm[: ret * channel_count]).tobytes()
-    
+
     def pcm_size(self, duration: int):
         "Get the pcm output size in bytes given duration in ms."
         return self.SAMPLE_SIZE * self.SAMPLING_RATE * duration // 1000

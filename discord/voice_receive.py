@@ -128,9 +128,9 @@ class VoiceReceiver:
         return [ssrc for ssrc, user in self.voice_client.ws.ssrc_map.items() if user == user_id]
 
     def _get_user(self, user_id: int) -> Member | User | Object:
-        if (member := self.voice_client.guild.get_member(user_id)):
+        if member := self.voice_client.guild.get_member(user_id):
             return member
-        elif (user := self.voice_client.client.get_user(user_id)):
+        elif user := self.voice_client.client.get_user(user_id):
             return user
         else:
             return Object(user_id)
